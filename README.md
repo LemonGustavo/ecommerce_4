@@ -1,5 +1,4 @@
 # E-commerce - Projeto 4
-```markdown
 Projeto de e-commerce refatorado para usar InversifyJS como container de IoC, com PostgreSQL e Docker Compose, e fila de e-mail assíncrona com Redis + worker, para obtenção de nota na matéria de Arquitetura de Software (2026). Contém dois modos de execução selecionáveis por variável de ambiente (`APP_ENV`), sem mudar regras de negócio do projeto original em https://github.com/LemonGustavo/ecommerce_3/tree/main.
 
 ## Estrutura
