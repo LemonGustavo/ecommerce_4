@@ -107,9 +107,53 @@ Pontos de arquitetura:
 
 ## Testando
 
-Com a API e o worker rodando, em outro terminal:
+Há dois modos de testar: com Docker (recomendado) e local 
+(`npm run dev` + `npm run worker`, para desenvolvimento). Os comandos
+de `curl` são os mesmos; o que muda é como você inspeciona a fila e os logs.
 
-**Criar um pedido (POST):**
+> 💡 **Produtos disponíveis no seed:** `productId: 1` (O Programador Pragmático,
+> livro físico, R$ 100 + frete = R$ 110) e `productId: 2` (Clean Code, e-book,
+> R$ 50).
+
+### Subir a API e o worker
+
+**Modo Docker (recomendado):**
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+Isso sobe quatro containers: `banco` (PostgreSQL), `redis`, `api` (porta 3000)
+e `worker`. A API fica em `http://localhost:3000`; o worker consome a fila.
+
+Confirme que estão de pé:
+
+```bash
+docker compose ps
+# Esperado: banco, redis, api e worker, todos "Up" (banco e redis "healthy")
+```
+
+**Modo local (sem Docker):**
+
+Requer Postgres e Redis acessíveis em `localhost` (ver "Como rodar (local,
+sem Docker)" acima). Em **dois terminais separados**:
+
+```bash
+# Terminal 1 — API
+npm run dev
+
+# Terminal 2 — worker
+npm run worker
+```
+
+Esperado:
+- T1: `Server rodando em http://localhost:3000`
+- T2: `Worker conectado no Redis em redis://localhost:6379. Esperando pedidos em orders:email...`
+
+### Criar um pedido (POST)
+
+Em outro terminal, com a API e o worker rodando:
 
 ```bash
 curl -X POST http://localhost:3000/orders \
@@ -133,62 +177,179 @@ Resposta esperada (status 200) — **imediata**, sem esperar o e-mail:
 }
 ```
 
-- O e-mail **não** vem na resposta. Ele aparece no log do worker:
+> ⚠️ Não há `emailPreview` na resposta (diferente do Projeto 3).
+> O e-mail é assíncrono e sai no log do worker. A resposta volta em
+> milissegundos — o tempo do envio do e-mail não entra na latência da API.
+
+**Ver o e-mail no log do worker:**
 
 ```bash
+# Modo Docker:
 docker compose logs -f worker
-# Esperado:
-# Pedido #1 recebido da fila. Enviando para cliente@ethereal.email...
-# Email enviado: https://ethereal.email/message/...
-# E-mail do pedido #1 enviado!
+
+# Modo local (o worker está no seu terminal, é só olhar a saída):
+# (a linha aparece direto no terminal onde você rodou `npm run worker`)
 ```
 
-**Buscar um pedido (GET):**
+Esperado:
+
+```
+Pedido #1 recebido da fila. Enviando para cliente@ethereal.email...
+Email enviado: https://ethereal.email/message/...
+E-mail do pedido #1 enviado!
+```
+
+### Testar com cartão de crédito
+
+Basta trocar o final do JSON:
+
+```bash
+curl -X POST http://localhost:3000/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customer": "cliente@ethereal.email",
+    "items": [
+      { "productId": 2, "quantity": 1 }
+    ],
+    "paymentMethod": "credit_card",
+    "paymentDetails": { "cardNumber": "4111111111111111", "cvv": "123" }
+  }'
+```
+
+Esperado: `{"message":"Pedido processado com sucesso","orderId":<id>,"total":50}`.
+
+### Buscar um pedido (GET)
 
 ```bash
 curl http://localhost:3000/orders/1
 ```
 
-Retorna o pedido com `id: 1` (status 200).
+Retorna o pedido com `id: 1` (status 200), incluindo `items`, `total`, `status`
+e `createdAt`.
 
-**Pedido inexistente (GET):**
+### Pedido inexistente (GET)
 
 ```bash
 curl -i http://localhost:3000/orders/999
 ```
 
-Retorna status **404** com `{"error":"Pedido 999 não encontrado"}`.
-
-Também é possível testar com cartão de crédito trocando o final do JSON:
+Retorna status **404** com:
 
 ```json
-"paymentMethod": "credit_card",
-"paymentDetails": { "cardNumber": "4111111111111111", "cvv": "123" }
+{"error":"Pedido 999 não encontrado"}
 ```
+
+---
 
 ### Testando a fila
 
-**Worker parado — pedidos esperam na fila:**
+Os testes abaixo provam os critérios de aceite 3 e 4 do Projeto 4. Escolha o
+bloco do modo que você está usando (**Docker** ou **local**) — não misture os
+comandos, porque o Redis do Compose (`redis`) e o Redis local (`redis-local`)
+são containers diferentes.
+
+#### Worker parado: pedidos esperam na fila
+
+**Modo Docker:**
 
 ```bash
+# 1. Parar o worker
 docker compose stop worker
-# publique 2 pedidos com o curl acima
+
+# 2. Publicar 2 pedidos válidos (produtos 1 e 2)
+curl -s -X POST http://localhost:3000/orders -H "Content-Type: application/json" \
+  -d '{"customer":"p1@ethereal.email","items":[{"productId":1,"quantity":1}],"paymentMethod":"pix"}' > /dev/null
+curl -s -X POST http://localhost:3000/orders -H "Content-Type: application/json" \
+  -d '{"customer":"p2@ethereal.email","items":[{"productId":2,"quantity":1}],"paymentMethod":"pix"}' > /dev/null
+
+# 3. A PROVA: fila tem 2 itens parados (worker parado não consumiu)
 docker compose exec redis redis-cli LLEN orders:email
-# Esperado: (integer) 2   ← pedidos parados na fila
+# Esperado: (integer) 2
+
+# 4. Subir o worker de novo
 docker compose start worker
-# Esperado: worker processa os 2 pedidos, e LLEN volta a 0
-```
+docker compose logs -f worker
+# Esperado: processa os 2 pedidos (#X e #Y)
 
-**Dois workers — cada pedido enviado uma vez só:**
-
-```bash
-docker compose up -d --scale worker=2
-# publique vários pedidos
-docker compose logs worker
-# Esperado: cada orderId aparece uma vez só, distribuído entre worker-1 e worker-2
+# 5. Fila vazia
 docker compose exec redis redis-cli LLEN orders:email
 # Esperado: (integer) 0
-docker compose up -d --scale worker=1   # volta para 1 worker
+```
+
+**Modo local:**
+
+```bash
+# 1. Parar o worker (Ctrl+C no terminal do `npm run worker`)
+
+# 2. Publicar 2 pedidos válidos
+curl -s -X POST http://localhost:3000/orders -H "Content-Type: application/json" \
+  -d '{"customer":"p1@ethereal.email","items":[{"productId":1,"quantity":1}],"paymentMethod":"pix"}' > /dev/null
+curl -s -X POST http://localhost:3000/orders -H "Content-Type: application/json" \
+  -d '{"customer":"p2@ethereal.email","items":[{"productId":2,"quantity":1}],"paymentMethod":"pix"}' > /dev/null
+
+# 3. A PROVA (atenção: redis-local, não redis)
+docker exec redis-local redis-cli LLEN orders:email
+# Esperado: (integer) 2
+
+# 4. Subir o worker de novo
+npm run worker
+# Esperado: processa os 2 pedidos
+
+# 5. Fila vazia
+docker exec redis-local redis-cli LLEN orders:email
+# Esperado: (integer) 0
+```
+
+> ⚠️ **Se o `LLEN` der `0` em vez de `2`:** o worker **não estava parado** quando
+> você publicou. Confira com `docker compose ps worker` (modo Docker) ou
+> `sudo lsof -i :3000` (modo local, para ver se há `tsx watch` duplicado).
+> O `LLEN` só dá `2` se **nenhum** worker estiver consumindo no momento do POST.
+
+#### Critério 4 — Dois workers: cada pedido enviado uma vez só
+
+**Modo Docker:**
+
+```bash
+# 1. Escalar para 2 workers
+docker compose up -d --scale worker=2
+
+# 2. Confirmar que há dois
+docker compose ps
+# Esperado: ecommerce-worker-1 e ecommerce-worker-2, ambos Up
+
+# 3. Publicar 6 pedidos de uma vez
+for i in 1 2 3 4 5 6; do
+  curl -s -X POST http://localhost:3000/orders -H "Content-Type: application/json" \
+    -d "{\"customer\":\"c$i@ethereal.email\",\"items\":[{\"productId\":1,\"quantity\":1}],\"paymentMethod\":\"pix\"}" > /dev/null
+done
+
+# 4. Ver a distribuição nos logs
+docker compose logs worker
+# Esperado: os 6 orderIds aparecem UMA VEZ SÓ, distribuídos entre worker-1 e worker-2
+
+# 5. Fila vazia (nada duplicado, nada perdido)
+docker compose exec redis redis-cli LLEN orders:email
+# Esperado: (integer) 0
+
+# 6. Voltar para 1 worker
+docker compose up -d --scale worker=1
+```
+
+**Modo local:** o scale de workers não é trivial sem Docker Compose (você teria
+que abrir dois terminais rodando `npm run worker`). 
+
+#### Inspecionar a fila manualmente
+
+Para ver o que está na fila a qualquer momento:
+
+```bash
+# Modo Docker:
+docker compose exec redis redis-cli LLEN orders:email
+docker compose exec redis redis-cli LRANGE orders:email 0 -1   # vê o conteúdo (JSON)
+
+# Modo local:
+docker exec redis-local redis-cli LLEN orders:email
+docker exec redis-local redis-cli LRANGE orders:email 0 -1
 ```
 
 ## Arquitetura de injeção
